@@ -1,0 +1,143 @@
+name: Deploy to Google Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: "Deployment target"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - client
+          - server
+
+env:
+  PROJECT_ID: ${{ secrets.GOOGLE_CLOUD_PROJECT || secrets.GCP_PROJECT_ID }}
+  REGION: "us-east4"
+  CLIENT_DIR: "ayu-life/client"
+  SERVER_DIR: "ayu-life/server"
+  CLIENT_SERVICE: "ayulife-client"
+  SERVER_SERVICE: "ayulife-server"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_client: ${{ steps.set-targets.outputs.deploy_client }}
+      deploy_server: ${{ steps.set-targets.outputs.deploy_server }}
+    steps:
+      - name: Set deployment targets
+        id: set-targets
+        run: |
+          if [[ "${{ github.event.inputs.deploy_target }}" == "client" ]]; then
+            echo "deploy_client=true" >> $GITHUB_OUTPUT
+            echo "deploy_server=false" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.deploy_target }}" == "server" ]]; then
+            echo "deploy_client=false" >> $GITHUB_OUTPUT
+            echo "deploy_server=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy_client=true" >> $GITHUB_OUTPUT
+            echo "deploy_server=true" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-client:
+    needs: setup
+    if: needs.setup.outputs.deploy_client == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: "${{ secrets.GCP_SA_KEY }}"
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Configure Docker to use gcloud credentials
+        run: gcloud auth configure-docker --quiet
+
+      - name: Set Google Cloud project
+        run: gcloud config set project $PROJECT_ID --quiet
+
+      - name: Build client image
+        working-directory: ${{ env.CLIENT_DIR }}
+        run: |
+          docker build --no-cache -t "gcr.io/$PROJECT_ID/$CLIENT_SERVICE:${{ github.sha }}" .
+          docker tag "gcr.io/$PROJECT_ID/$CLIENT_SERVICE:${{ github.sha }}" "gcr.io/$PROJECT_ID/$CLIENT_SERVICE:latest"
+
+      - name: Push client image
+        run: |
+          docker push "gcr.io/$PROJECT_ID/$CLIENT_SERVICE:${{ github.sha }}"
+          docker push "gcr.io/$PROJECT_ID/$CLIENT_SERVICE:latest"
+
+      - name: Deploy client to Cloud Run
+        run: |
+          gcloud run deploy "$CLIENT_SERVICE" \
+            --image "gcr.io/$PROJECT_ID/$CLIENT_SERVICE:${{ github.sha }}" \
+            --platform managed \
+            --region "$REGION" \
+            --allow-unauthenticated \
+            --quiet
+
+  deploy-server:
+    needs: setup
+    if: needs.setup.outputs.deploy_server == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: "${{ secrets.GCP_SA_KEY }}"
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Configure Docker to use gcloud credentials
+        run: gcloud auth configure-docker --quiet
+
+      - name: Set Google Cloud project
+        run: gcloud config set project $PROJECT_ID --quiet
+
+      - name: Build server image
+        working-directory: ${{ env.SERVER_DIR }}
+        run: |
+          docker build --no-cache -t "gcr.io/$PROJECT_ID/$SERVER_SERVICE:${{ github.sha }}" .
+          docker tag "gcr.io/$PROJECT_ID/$SERVER_SERVICE:${{ github.sha }}" "gcr.io/$PROJECT_ID/$SERVER_SERVICE:latest"
+
+      - name: Push server image
+        run: |
+          docker push "gcr.io/$PROJECT_ID/$SERVER_SERVICE:${{ github.sha }}"
+          docker push "gcr.io/$PROJECT_ID/$SERVER_SERVICE:latest"
+
+      - name: Deploy server to Cloud Run
+        run: |
+          gcloud run deploy "$SERVER_SERVICE" \
+            --image "gcr.io/$PROJECT_ID/$SERVER_SERVICE:${{ github.sha }}" \
+            --platform managed \
+            --region "$REGION" \
+            --allow-unauthenticated \
+            --set-env-vars \
+              OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}",\
+              ASSISTANT_ID="${{ secrets.ASSISTANT_ID }}",\
+              LANGFUSE_SECRET_KEY="${{ secrets.LANGFUSE_SECRET_KEY }}",\
+              LANGFUSE_PUBLIC_KEY="${{ secrets.LANGFUSE_PUBLIC_KEY }}",\
+              LANGFUSE_HOST="${{ secrets.LANGFUSE_HOST }}" \
+            --quiet
